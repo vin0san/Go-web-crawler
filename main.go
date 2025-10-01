@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -10,9 +11,15 @@ import (
 	"golang.org/x/net/html"
 )
 
+// struct for JSON response
+type Page struct {
+	URL   string `json:"url"`
+	Title string `json:"title"`
+}
+
 func main() {
-	startURL := "https://4chan.org"
-	maxDepth := 20
+	startURL := "https://go.dev/"
+	maxDepth := 2
 
 	// Create a file to store results
 	file, err := os.Create("results.txt")
@@ -21,6 +28,10 @@ func main() {
 		return
 	}
 	defer file.Close()
+
+	// Slice to hold results
+	var pages []Page
+	var pagesMu sync.Mutex
 	fmt.Println("Starting web crawler on:", startURL, "with max depth:", maxDepth)
 
 	// Create a wait group to manage goroutines
@@ -31,14 +42,30 @@ func main() {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		crawl(startURL, maxDepth, &wg, visited, &mu, startURL, file)
+		crawl(startURL, maxDepth, &wg, visited, &mu, startURL, file, &pages, &pagesMu)
 	}()
 
 	wg.Wait()
 	fmt.Println("Crawling completed.")
+
+	// Write results to JSON file
+	jsonFile, err := os.Create("output.json")
+	if err != nil {
+		fmt.Println("Error creating JSON file:", err)
+		return
+	}
+	defer jsonFile.Close()
+
+	encoder := json.NewEncoder(jsonFile)
+	encoder.SetIndent("", "  ")
+	if err := encoder.Encode(pages); err != nil {
+		fmt.Println("Error encoding JSON:", err)
+		return
+	}
+	fmt.Println("Results written to output.json")
 }
 
-func crawl(currentURL string, depth int, wg *sync.WaitGroup, visited map[string]bool, mu *sync.Mutex, base string, file *os.File) {
+func crawl(currentURL string, depth int, wg *sync.WaitGroup, visited map[string]bool, mu *sync.Mutex, base string, file *os.File, pages *[]Page, pagesMu *sync.Mutex) {
 	if depth <= 0 {
 		return
 	}
@@ -76,6 +103,11 @@ func crawl(currentURL string, depth int, wg *sync.WaitGroup, visited map[string]
 	fmt.Fprint(file, "Title of ", currentURL, " is: ", title, "\n")
 	mu.Unlock()
 
+	// Append to pages slice
+	pagesMu.Lock()
+	*pages = append(*pages, Page{URL: currentURL, Title: title})
+	pagesMu.Unlock()
+
 	links := getLinks(doc)
 	fmt.Println("Found", len(links), "links on", currentURL)
 
@@ -95,7 +127,7 @@ func crawl(currentURL string, depth int, wg *sync.WaitGroup, visited map[string]
 		wg.Add(1)
 		go func(link string) {
 			defer wg.Done()
-			crawl(link, depth-1, wg, visited, mu, base, file)
+			crawl(link, depth-1, wg, visited, mu, base, file, pages, pagesMu)
 		}(absURL)
 	}
 }
@@ -124,7 +156,7 @@ func getLinks(n *html.Node) []string {
 // function to extract title from HTML nodes
 
 func getTitle(n *html.Node) string {
-	if n.Type == html.ElementNode && n.Data == "title" {
+	if n.Type == html.ElementNode && n.Data == "title" && n.FirstChild != nil {
 		return n.FirstChild.Data
 	}
 	for c := n.FirstChild; c != nil; c = c.NextSibling {
